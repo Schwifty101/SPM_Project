@@ -7,7 +7,7 @@ import json
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import numpy as np
 
 
@@ -251,7 +251,7 @@ class CustomerDataGenerator:
             "status": status
         }
 
-    def generate_all_data(self) -> tuple[List[Dict], List[Dict]]:
+    def generate_all_data(self) -> Tuple[List[Dict], List[Dict]]:
         """
         Generate all customer profiles and transactions
 

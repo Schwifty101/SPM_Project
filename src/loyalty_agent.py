@@ -4,122 +4,111 @@ Implements customer segmentation, reward optimization, and churn prediction
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import numpy as np
+from typing import Dict, List, Any, Optional, Tuple
+
+try:
+    from src.constants import (
+        REWARD_CATALOG, RFM_RECENCY_DECAY_DAYS, RFM_MAX_FREQUENCY, RFM_MAX_LTV,
+        RFM_WEIGHT_RECENCY, RFM_WEIGHT_FREQUENCY, RFM_WEIGHT_MONETARY,
+        CHURN_RECENCY_RECENT, CHURN_RECENCY_MODERATE, CHURN_RECENCY_OLD,
+        CHURN_RISK_HIGH, CHURN_RISK_MEDIUM, CHURN_WEIGHT_RECENCY, CHURN_WEIGHT_FREQUENCY,
+        CHURN_WEIGHT_ENGAGEMENT, CHURN_WEIGHT_RFM, FREQUENCY_HIGH, FREQUENCY_MEDIUM,
+        FREQUENCY_LOW, ENGAGEMENT_HIGH, ENGAGEMENT_MEDIUM, RFM_CHAMPION_THRESHOLD,
+        RFM_LOYAL_THRESHOLD, RFM_POTENTIAL_THRESHOLD, NEW_CUSTOMER_PURCHASE_LIMIT,
+        MAX_RETENTION_LIFT, HIGH_VALUE_CHURN_THRESHOLD, HIGH_VALUE_MIN_LTV,
+        DEFAULT_CUSTOMERS_FILE, DEFAULT_TRANSACTIONS_FILE
+    )
+    from src.validators import validate_customer_id, validate_probability, validate_limit
+    from src.logger import get_logger
+except ImportError:
+    from constants import (
+        REWARD_CATALOG, RFM_RECENCY_DECAY_DAYS, RFM_MAX_FREQUENCY, RFM_MAX_LTV,
+        RFM_WEIGHT_RECENCY, RFM_WEIGHT_FREQUENCY, RFM_WEIGHT_MONETARY,
+        CHURN_RECENCY_RECENT, CHURN_RECENCY_MODERATE, CHURN_RECENCY_OLD,
+        CHURN_RISK_HIGH, CHURN_RISK_MEDIUM, CHURN_WEIGHT_RECENCY, CHURN_WEIGHT_FREQUENCY,
+        CHURN_WEIGHT_ENGAGEMENT, CHURN_WEIGHT_RFM, FREQUENCY_HIGH, FREQUENCY_MEDIUM,
+        FREQUENCY_LOW, ENGAGEMENT_HIGH, ENGAGEMENT_MEDIUM, RFM_CHAMPION_THRESHOLD,
+        RFM_LOYAL_THRESHOLD, RFM_POTENTIAL_THRESHOLD, NEW_CUSTOMER_PURCHASE_LIMIT,
+        MAX_RETENTION_LIFT, HIGH_VALUE_CHURN_THRESHOLD, HIGH_VALUE_MIN_LTV,
+        DEFAULT_CUSTOMERS_FILE, DEFAULT_TRANSACTIONS_FILE
+    )
+    from validators import validate_customer_id, validate_probability, validate_limit
+    from logger import get_logger
 
 
 class LoyaltyAgent:
-    """
-    AI Agent for customer loyalty optimization
-    Implements RFM analysis, segmentation, and personalized reward recommendations
-    """
+    """AI Agent for customer loyalty optimization with RFM analysis and personalized recommendations"""
 
-    # Reward types with costs (in PKR)
-    REWARD_CATALOG = {
-        "premium_discount": {"name": "20% Premium Discount", "cost": 500, "value": "20% off next purchase"},
-        "standard_discount": {"name": "10% Standard Discount", "cost": 200, "value": "10% off next purchase"},
-        "free_shipping": {"name": "Free Shipping Voucher", "cost": 150, "value": "Free shipping on next order"},
-        "gift_voucher": {"name": "PKR 500 Gift Voucher", "cost": 500, "value": "PKR 500 gift card"},
-        "loyalty_points": {"name": "1000 Loyalty Points", "cost": 100, "value": "1000 bonus points"},
-        "early_access": {"name": "Early Access to Sales", "cost": 50, "value": "24-hour early access"},
-        "birthday_special": {"name": "Birthday Special Offer", "cost": 300, "value": "Special birthday gift"},
-        "bundle_offer": {"name": "Bundle Deal", "cost": 250, "value": "Buy 2 Get 1 Free"},
-        "vip_upgrade": {"name": "VIP Tier Upgrade", "cost": 1000, "value": "Upgrade to next tier"},
-        "cashback": {"name": "15% Cashback", "cost": 350, "value": "15% cashback on purchase"}
-    }
-
-    # Churn risk thresholds
-    CHURN_THRESHOLDS = {
-        "high_risk": 0.7,      # >70% churn probability
-        "medium_risk": 0.4,    # 40-70% churn probability
-        "low_risk": 0.0        # <40% churn probability
-    }
-
-    def __init__(self, customers_file: str = "data/customers.json",
-                 transactions_file: str = "data/transactions.json"):
-        """
-        Initialize Loyalty Agent
-
-        Args:
-            customers_file: Path to customers JSON file
-            transactions_file: Path to transactions JSON file
-        """
+    def __init__(self, customers_file: str = DEFAULT_CUSTOMERS_FILE,
+                 transactions_file: str = DEFAULT_TRANSACTIONS_FILE):
+        """Initialize Loyalty Agent and load data"""
+        self.logger = get_logger(__name__)
         self.customers_file = customers_file
         self.transactions_file = transactions_file
-        self.customers = []
-        self.transactions = []
-        self.rfm_scores = {}
-
-        # Load data if files exist
+        self.customers: List[Dict] = []
+        self.transactions: List[Dict] = []
         self._load_data()
 
-    def _load_data(self):
+    def _load_data(self) -> None:
         """Load customer and transaction data from JSON files"""
         try:
             customers_path = Path(self.customers_file)
             if customers_path.exists():
                 with open(customers_path, 'r') as f:
                     self.customers = json.load(f)
-                print(f"✓ Loaded {len(self.customers)} customers")
+                self.logger.info(f"Loaded {len(self.customers)} customers")
 
             transactions_path = Path(self.transactions_file)
             if transactions_path.exists():
                 with open(transactions_path, 'r') as f:
                     self.transactions = json.load(f)
-                print(f"✓ Loaded {len(self.transactions)} transactions")
-
+                self.logger.info(f"Loaded {len(self.transactions)} transactions")
         except Exception as e:
-            print(f"Warning: Could not load data files: {e}")
+            self.logger.error(f"Error loading data: {e}")
+            raise
+
+    def _get_customer(self, customer_id: str) -> Optional[Dict]:
+        """Get customer by ID"""
+        return next((c for c in self.customers if c['customer_id'] == customer_id), None)
+
+    def _get_customer_transactions(self, customer_id: str) -> List[Dict]:
+        """Get completed transactions for a customer"""
+        return [t for t in self.transactions
+                if t['customer_id'] == customer_id and t['status'] == 'Completed']
 
     def calculate_rfm_score(self, customer_id: str) -> Dict[str, float]:
-        """
-        Calculate RFM (Recency, Frequency, Monetary) score for a customer
+        """Calculate RFM (Recency, Frequency, Monetary) score"""
+        customer_id = validate_customer_id(customer_id)
+        customer = self._get_customer(customer_id)
 
-        Args:
-            customer_id: Unique customer identifier
-
-        Returns:
-            Dictionary with R, F, M scores and normalized RFM score (0-100)
-        """
-        # Get customer data
-        customer = next((c for c in self.customers if c['customer_id'] == customer_id), None)
         if not customer:
-            return {"recency": 0, "frequency": 0, "monetary": 0, "rfm_score": 0, "error": "Customer not found"}
+            self.logger.warning(f"Customer not found: {customer_id}")
+            return {"recency": 0, "frequency": 0, "monetary": 0, "rfm_score": 0,
+                    "error": "Customer not found"}
 
-        # Get customer transactions
-        customer_txns = [t for t in self.transactions
-                        if t['customer_id'] == customer_id and t['status'] == 'Completed']
-
+        customer_txns = self._get_customer_transactions(customer_id)
         if not customer_txns:
             return {"recency": 0, "frequency": 0, "monetary": 0, "rfm_score": 0}
 
-        # Calculate Recency (days since last purchase - lower is better)
+        # Recency: days since last purchase (lower is better)
         last_purchase = datetime.strptime(customer['last_purchase_date'], "%Y-%m-%d")
-        today = datetime.now()
-        recency_days = (today - last_purchase).days
+        recency_days = (datetime.now() - last_purchase).days
+        recency_score = max(0, 100 - (recency_days / RFM_RECENCY_DECAY_DAYS))
 
-        # Normalize recency (0-100, where 100 is most recent)
-        # Using inverse exponential: score decreases as days increase
-        recency_score = max(0, 100 - (recency_days / 3.65))  # Decay over ~1 year
-
-        # Calculate Frequency (number of purchases)
+        # Frequency: number of purchases
         frequency = customer['total_purchases']
+        frequency_score = min(100, (frequency / RFM_MAX_FREQUENCY) * 100)
 
-        # Normalize frequency (0-100)
-        # Assuming max frequency of 150 purchases (from data generation)
-        frequency_score = min(100, (frequency / 150) * 100)
-
-        # Calculate Monetary (total lifetime value)
+        # Monetary: total lifetime value
         monetary = customer['lifetime_value']
-
-        # Normalize monetary (0-100)
-        # Assuming max LTV of 300,000 PKR
-        monetary_score = min(100, (monetary / 300000) * 100)
+        monetary_score = min(100, (monetary / RFM_MAX_LTV) * 100)
 
         # Combined RFM score (weighted average)
-        rfm_score = (recency_score * 0.3 + frequency_score * 0.35 + monetary_score * 0.35)
+        rfm_score = (recency_score * RFM_WEIGHT_RECENCY +
+                    frequency_score * RFM_WEIGHT_FREQUENCY +
+                    monetary_score * RFM_WEIGHT_MONETARY)
 
         return {
             "recency": round(recency_score, 2),
@@ -132,108 +121,77 @@ class LoyaltyAgent:
         }
 
     def predict_churn_probability(self, customer_id: str) -> float:
-        """
-        Predict churn probability for a customer (0-1 scale)
+        """Predict churn probability using multi-factor analysis"""
+        customer_id = validate_customer_id(customer_id)
+        customer = self._get_customer(customer_id)
 
-        Uses multiple factors:
-        - Recency of last purchase
-        - Purchase frequency decline
-        - Engagement score
-        - RFM score
-
-        Args:
-            customer_id: Unique customer identifier
-
-        Returns:
-            Churn probability (0-1, where 1 = high risk)
-        """
-        customer = next((c for c in self.customers if c['customer_id'] == customer_id), None)
         if not customer:
-            return 1.0  # Unknown customer = high risk
+            self.logger.warning(f"Customer not found: {customer_id}")
+            return 1.0
 
-        # Factor 1: Recency risk (days since last purchase)
+        # Recency risk
         last_purchase = datetime.strptime(customer['last_purchase_date'], "%Y-%m-%d")
         days_since_purchase = (datetime.now() - last_purchase).days
 
-        # Recency risk increases exponentially after 90 days
-        if days_since_purchase < 30:
+        if days_since_purchase < CHURN_RECENCY_RECENT:
             recency_risk = 0.1
-        elif days_since_purchase < 90:
+        elif days_since_purchase < CHURN_RECENCY_MODERATE:
             recency_risk = 0.3
-        elif days_since_purchase < 180:
+        elif days_since_purchase < CHURN_RECENCY_OLD:
             recency_risk = 0.6
         else:
             recency_risk = 0.9
 
-        # Factor 2: Frequency risk (purchase frequency)
+        # Frequency risk
         frequency = customer['purchase_frequency']
-        if frequency > 2:  # >2 purchases/month
+        if frequency > FREQUENCY_HIGH:
             frequency_risk = 0.1
-        elif frequency > 1:
+        elif frequency > FREQUENCY_MEDIUM:
             frequency_risk = 0.3
-        elif frequency > 0.5:
+        elif frequency > FREQUENCY_LOW:
             frequency_risk = 0.5
         else:
             frequency_risk = 0.8
 
-        # Factor 3: Engagement risk (inverse of engagement score)
-        engagement = customer['engagement_score']
-        engagement_risk = 1 - (engagement / 100)
+        # Engagement risk
+        engagement_risk = 1 - (customer['engagement_score'] / 100)
 
-        # Factor 4: RFM risk
+        # RFM risk
         rfm = self.calculate_rfm_score(customer_id)
         rfm_risk = 1 - (rfm['rfm_score'] / 100)
 
         # Weighted churn probability
         churn_probability = (
-            recency_risk * 0.35 +
-            frequency_risk * 0.25 +
-            engagement_risk * 0.25 +
-            rfm_risk * 0.15
+            recency_risk * CHURN_WEIGHT_RECENCY +
+            frequency_risk * CHURN_WEIGHT_FREQUENCY +
+            engagement_risk * CHURN_WEIGHT_ENGAGEMENT +
+            rfm_risk * CHURN_WEIGHT_RFM
         )
 
         return round(min(1.0, churn_probability), 3)
 
     def segment_customer(self, customer_id: str) -> Dict[str, Any]:
-        """
-        Perform advanced customer segmentation
+        """Perform advanced customer segmentation"""
+        customer_id = validate_customer_id(customer_id)
+        customer = self._get_customer(customer_id)
 
-        Args:
-            customer_id: Unique customer identifier
-
-        Returns:
-            Dictionary with segment, tier, and behavioral insights
-        """
-        customer = next((c for c in self.customers if c['customer_id'] == customer_id), None)
         if not customer:
             return {"error": "Customer not found"}
 
         rfm = self.calculate_rfm_score(customer_id)
         churn_prob = self.predict_churn_probability(customer_id)
-
-        # Determine detailed segment
         rfm_score = rfm['rfm_score']
 
-        if rfm_score >= 75:
-            if churn_prob < 0.3:
-                detailed_segment = "Champion"
-            else:
-                detailed_segment = "At-Risk Champion"
-        elif rfm_score >= 50:
-            if churn_prob < 0.4:
-                detailed_segment = "Loyal Customer"
-            else:
-                detailed_segment = "At-Risk Loyal"
-        elif rfm_score >= 30:
-            if churn_prob < 0.5:
-                detailed_segment = "Potential Loyalist"
-            else:
-                detailed_segment = "Hibernating"
+        # Determine detailed segment
+        if rfm_score >= RFM_CHAMPION_THRESHOLD:
+            detailed_segment = "Champion" if churn_prob < 0.3 else "At-Risk Champion"
+        elif rfm_score >= RFM_LOYAL_THRESHOLD:
+            detailed_segment = "Loyal Customer" if churn_prob < 0.4 else "At-Risk Loyal"
+        elif rfm_score >= RFM_POTENTIAL_THRESHOLD:
+            detailed_segment = "Potential Loyalist" if churn_prob < 0.5 else "Hibernating"
         else:
-            if customer['total_purchases'] < 3:
-                detailed_segment = "New Customer"
-            else:
-                detailed_segment = "Lost Customer"
+            detailed_segment = ("New Customer" if customer['total_purchases'] < NEW_CUSTOMER_PURCHASE_LIMIT
+                              else "Lost Customer")
 
         return {
             "customer_id": customer_id,
@@ -242,100 +200,60 @@ class LoyaltyAgent:
             "detailed_segment": detailed_segment,
             "rfm_score": rfm['rfm_score'],
             "churn_probability": churn_prob,
-            "is_at_risk": churn_prob >= self.CHURN_THRESHOLDS['medium_risk'],
-            "engagement_level": "High" if customer['engagement_score'] >= 70 else
-                               "Medium" if customer['engagement_score'] >= 40 else "Low"
+            "is_at_risk": churn_prob >= CHURN_RISK_MEDIUM,
+            "engagement_level": ("High" if customer['engagement_score'] >= ENGAGEMENT_HIGH else
+                               "Medium" if customer['engagement_score'] >= ENGAGEMENT_MEDIUM else "Low")
         }
 
+    def _select_reward_strategy(self, detailed_segment: str, churn_prob: float) -> Tuple[List[Tuple[str, float]], str]:
+        """Select reward strategy based on customer segment and churn risk"""
+
+        if detailed_segment in ["At-Risk Champion", "At-Risk Loyal"] or churn_prob >= CHURN_RISK_HIGH:
+            return [("vip_upgrade", 0.9), ("premium_discount", 0.85),
+                   ("gift_voucher", 0.8), ("cashback", 0.75)], "Churn Prevention - High Value Retention"
+
+        if detailed_segment in ["Champion", "Loyal Customer"]:
+            return [("early_access", 0.9), ("vip_upgrade", 0.8),
+                   ("birthday_special", 0.75), ("premium_discount", 0.7)], "Engagement & Loyalty Reinforcement"
+
+        if detailed_segment == "Potential Loyalist":
+            return [("loyalty_points", 0.9), ("bundle_offer", 0.85),
+                   ("standard_discount", 0.8), ("free_shipping", 0.7)], "Growth & Upsell"
+
+        if detailed_segment == "New Customer":
+            return [("standard_discount", 0.9), ("free_shipping", 0.85),
+                   ("loyalty_points", 0.8)], "New Customer Activation"
+
+        return [("premium_discount", 0.9), ("gift_voucher", 0.85),
+               ("cashback", 0.8)], "Win-Back Campaign"
+
     def recommend_reward(self, customer_id: str) -> Dict[str, Any]:
-        """
-        Recommend personalized reward/incentive for a customer
+        """Recommend personalized reward/incentive using multi-armed bandit approach"""
+        customer_id = validate_customer_id(customer_id)
+        customer = self._get_customer(customer_id)
 
-        Uses multi-armed bandit-inspired approach with contextual factors:
-        - Customer segment and tier
-        - Churn risk
-        - RFM score
-        - Purchase history
-
-        Args:
-            customer_id: Unique customer identifier
-
-        Returns:
-            Dictionary with reward recommendation and reasoning
-        """
-        customer = next((c for c in self.customers if c['customer_id'] == customer_id), None)
         if not customer:
             return {"error": "Customer not found"}
 
-        # Get customer insights
         segmentation = self.segment_customer(customer_id)
         churn_prob = segmentation['churn_probability']
-        rfm_score = segmentation['rfm_score']
         detailed_segment = segmentation['detailed_segment']
 
-        # Reward selection logic based on customer profile
-        recommended_rewards = []
-
-        # High-value at-risk customers (prevent churn)
-        if detailed_segment in ["At-Risk Champion", "At-Risk Loyal"] or churn_prob >= 0.7:
-            recommended_rewards = [
-                ("vip_upgrade", 0.9),
-                ("premium_discount", 0.85),
-                ("gift_voucher", 0.8),
-                ("cashback", 0.75)
-            ]
-            strategy = "Churn Prevention - High Value Retention"
-
-        # Champions and Loyal Customers (maintain engagement)
-        elif detailed_segment in ["Champion", "Loyal Customer"]:
-            recommended_rewards = [
-                ("early_access", 0.9),
-                ("vip_upgrade", 0.8),
-                ("birthday_special", 0.75),
-                ("premium_discount", 0.7)
-            ]
-            strategy = "Engagement & Loyalty Reinforcement"
-
-        # Potential Loyalists (nurture growth)
-        elif detailed_segment == "Potential Loyalist":
-            recommended_rewards = [
-                ("loyalty_points", 0.9),
-                ("bundle_offer", 0.85),
-                ("standard_discount", 0.8),
-                ("free_shipping", 0.7)
-            ]
-            strategy = "Growth & Upsell"
-
-        # New Customers (encourage repeat purchase)
-        elif detailed_segment == "New Customer":
-            recommended_rewards = [
-                ("standard_discount", 0.9),
-                ("free_shipping", 0.85),
-                ("loyalty_points", 0.8)
-            ]
-            strategy = "New Customer Activation"
-
-        # Hibernating/Lost Customers (win-back)
-        else:
-            recommended_rewards = [
-                ("premium_discount", 0.9),
-                ("gift_voucher", 0.85),
-                ("cashback", 0.8)
-            ]
-            strategy = "Win-Back Campaign"
+        # Get reward strategy
+        recommended_rewards, strategy = self._select_reward_strategy(detailed_segment, churn_prob)
 
         # Select top reward
         if recommended_rewards:
             top_reward_key, confidence = recommended_rewards[0]
-            top_reward = self.REWARD_CATALOG[top_reward_key]
+            top_reward = REWARD_CATALOG[top_reward_key]
         else:
             top_reward_key = "standard_discount"
-            top_reward = self.REWARD_CATALOG[top_reward_key]
+            top_reward = REWARD_CATALOG[top_reward_key]
             confidence = 0.5
             strategy = "Default Reward"
 
         # Calculate expected ROI
-        expected_retention_lift = confidence * 0.3  # 30% max retention improvement
+        expected_retention_lift = confidence * MAX_RETENTION_LIFT
         customer_ltv = customer['lifetime_value']
         expected_value = customer_ltv * expected_retention_lift
         reward_cost = top_reward['cost']
@@ -348,38 +266,35 @@ class LoyaltyAgent:
             "confidence": round(confidence, 2),
             "strategy": strategy,
             "alternative_rewards": [
-                {"reward": self.REWARD_CATALOG[r[0]]['name'], "confidence": r[1]}
+                {"reward": REWARD_CATALOG[r[0]]['name'], "confidence": r[1]}
                 for r in recommended_rewards[1:3]
             ] if len(recommended_rewards) > 1 else [],
             "expected_retention_lift": f"{expected_retention_lift*100:.1f}%",
             "expected_roi": f"{expected_roi:.1f}%",
             "reasoning": {
                 "segment": detailed_segment,
-                "churn_risk": "High" if churn_prob >= 0.7 else "Medium" if churn_prob >= 0.4 else "Low",
-                "rfm_score": rfm_score,
+                "churn_risk": "High" if churn_prob >= CHURN_RISK_HIGH else "Medium" if churn_prob >= CHURN_RISK_MEDIUM else "Low",
+                "rfm_score": segmentation['rfm_score'],
                 "lifetime_value": customer_ltv
             }
         }
 
     def analyze_customer(self, customer_id: str) -> Dict[str, Any]:
-        """
-        Comprehensive customer analysis combining all insights
+        """Comprehensive customer analysis combining all insights"""
+        customer_id = validate_customer_id(customer_id)
+        customer = self._get_customer(customer_id)
 
-        Args:
-            customer_id: Unique customer identifier
-
-        Returns:
-            Complete analysis with segmentation, churn risk, and recommendations
-        """
-        customer = next((c for c in self.customers if c['customer_id'] == customer_id), None)
         if not customer:
+            self.logger.warning(f"Customer not found: {customer_id}")
             return {"error": "Customer not found", "customer_id": customer_id}
 
-        # Gather all insights
         rfm = self.calculate_rfm_score(customer_id)
         segmentation = self.segment_customer(customer_id)
         churn_prediction = self.predict_churn_probability(customer_id)
         reward_recommendation = self.recommend_reward(customer_id)
+
+        self.logger.info(f"Analyzed customer {customer_id}: segment={segmentation['detailed_segment']}, "
+                        f"churn={churn_prediction}")
 
         return {
             "customer_id": customer_id,
@@ -394,7 +309,8 @@ class LoyaltyAgent:
             "segmentation": segmentation,
             "churn_prediction": {
                 "probability": churn_prediction,
-                "risk_level": "High" if churn_prediction >= 0.7 else "Medium" if churn_prediction >= 0.4 else "Low",
+                "risk_level": ("High" if churn_prediction >= CHURN_RISK_HIGH else
+                             "Medium" if churn_prediction >= CHURN_RISK_MEDIUM else "Low"),
                 "predicted_retention": f"{(1-churn_prediction)*100:.1f}%"
             },
             "recommendation": reward_recommendation,
@@ -407,24 +323,19 @@ class LoyaltyAgent:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
-    def batch_analyze(self, customer_ids: List[str] = None, limit: int = None) -> List[Dict[str, Any]]:
-        """
-        Analyze multiple customers in batch
-
-        Args:
-            customer_ids: Optional list of specific customer IDs
-            limit: Maximum number of customers to analyze
-
-        Returns:
-            List of customer analyses
-        """
+    def batch_analyze(self, customer_ids: Optional[List[str]] = None,
+                     limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Analyze multiple customers in batch"""
         if customer_ids:
-            ids_to_analyze = customer_ids
+            ids_to_analyze = [validate_customer_id(cid) for cid in customer_ids]
         else:
             ids_to_analyze = [c['customer_id'] for c in self.customers]
 
         if limit:
+            limit = validate_limit(limit)
             ids_to_analyze = ids_to_analyze[:limit]
+
+        self.logger.info(f"Batch analyzing {len(ids_to_analyze)} customers")
 
         results = []
         for customer_id in ids_to_analyze:
@@ -433,17 +344,12 @@ class LoyaltyAgent:
 
         return results
 
-    def get_high_value_at_risk_customers(self, threshold: float = 0.6, min_ltv: float = 50000) -> List[Dict]:
-        """
-        Identify high-value customers at risk of churning
+    def get_high_value_at_risk_customers(self, threshold: float = HIGH_VALUE_CHURN_THRESHOLD,
+                                        min_ltv: float = HIGH_VALUE_MIN_LTV) -> List[Dict]:
+        """Identify high-value customers at risk of churning"""
+        threshold = validate_probability(threshold, "threshold")
+        min_ltv = validate_probability(min_ltv, "min_ltv") if min_ltv <= 1 else min_ltv
 
-        Args:
-            threshold: Churn probability threshold
-            min_ltv: Minimum lifetime value to consider
-
-        Returns:
-            List of at-risk high-value customers with recommendations
-        """
         at_risk_customers = []
 
         for customer in self.customers:
@@ -455,47 +361,45 @@ class LoyaltyAgent:
                     analysis = self.analyze_customer(customer_id)
                     at_risk_customers.append(analysis)
 
-        # Sort by lifetime value descending
         at_risk_customers.sort(key=lambda x: x['kpis']['lifetime_value'], reverse=True)
+
+        self.logger.info(f"Found {len(at_risk_customers)} high-value at-risk customers")
 
         return at_risk_customers
 
 
 def main():
     """Demo: Analyze sample customers"""
-    print("="*60)
+    print("=" * 60)
     print("LOYALTY AI AGENT - DEMO")
-    print("="*60)
+    print("=" * 60)
 
-    # Initialize agent
     agent = LoyaltyAgent()
 
     if not agent.customers:
         print("\n⚠ No customer data found. Please run data_generator.py first.")
         return
 
-    # Analyze first 5 customers
     print(f"\nAnalyzing sample customers...\n")
 
-    sample_customers = agent.customers[:5]
-    for customer in sample_customers:
+    for customer in agent.customers[:5]:
         customer_id = customer['customer_id']
         analysis = agent.analyze_customer(customer_id)
 
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(f"Customer: {customer_id} | Segment: {analysis['segmentation']['detailed_segment']}")
-        print(f"{'─'*60}")
+        print(f"{'─' * 60}")
         print(f"RFM Score: {analysis['rfm_analysis']['rfm_score']}/100")
-        print(f"Churn Risk: {analysis['churn_prediction']['risk_level']} ({analysis['churn_prediction']['probability']})")
+        print(f"Churn Risk: {analysis['churn_prediction']['risk_level']} "
+              f"({analysis['churn_prediction']['probability']})")
         print(f"Lifetime Value: PKR {analysis['kpis']['lifetime_value']:,.2f}")
         print(f"\nRecommended Action: {analysis['recommendation']['strategy']}")
         print(f"Reward: {analysis['recommendation']['reward_details']['name']}")
         print(f"Expected ROI: {analysis['recommendation']['expected_roi']}")
 
-    # High-value at-risk analysis
-    print(f"\n\n{'='*60}")
+    print(f"\n\n{'=' * 60}")
     print("HIGH-VALUE AT-RISK CUSTOMERS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     at_risk = agent.get_high_value_at_risk_customers(threshold=0.6, min_ltv=50000)
     print(f"\nFound {len(at_risk)} high-value customers at risk of churning\n")
@@ -506,7 +410,7 @@ def main():
         print(f"   Churn Risk: {customer_analysis['churn_prediction']['probability']}")
         print(f"   Action: {customer_analysis['recommendation']['reward_details']['name']}\n")
 
-    print("="*60)
+    print("=" * 60)
 
 
 if __name__ == "__main__":
