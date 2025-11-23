@@ -236,11 +236,15 @@ class TestLoyaltyAgent:
 
     def test_invalid_customer_handling(self):
         """Test handling of invalid customer IDs"""
+        from src.validators import CustomerNotFoundError
         agent = LoyaltyAgent()
 
-        # Test with non-existent customer
-        result = agent.analyze_customer("INVALID999")
-        assert 'error' in result, "Should return error for invalid customer"
+        # Test with non-existent customer - should raise exception
+        try:
+            agent.analyze_customer("INVALID999")
+            assert False, "Should raise CustomerNotFoundError for invalid customer"
+        except CustomerNotFoundError as e:
+            assert "INVALID999" in str(e), "Exception should contain customer ID"
 
         print("✓ Invalid customer handling test passed")
 

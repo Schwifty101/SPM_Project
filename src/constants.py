@@ -5,7 +5,7 @@ Constants and configuration for Loyalty AI Agent
 from typing import Dict, Any
 
 # RFM Scoring Parameters
-RFM_RECENCY_DECAY_DAYS = 3.65  # Decay factor for recency (365 days)
+RFM_RECENCY_DECAY_DAYS = 365  # Decay factor for recency (365 days = 1 year)
 RFM_MAX_FREQUENCY = 150  # Maximum expected purchase frequency
 RFM_MAX_LTV = 300000  # Maximum expected lifetime value (PKR)
 

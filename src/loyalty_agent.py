@@ -20,7 +20,7 @@ try:
         MAX_RETENTION_LIFT, HIGH_VALUE_CHURN_THRESHOLD, HIGH_VALUE_MIN_LTV,
         DEFAULT_CUSTOMERS_FILE, DEFAULT_TRANSACTIONS_FILE
     )
-    from src.validators import validate_customer_id, validate_probability, validate_limit
+    from src.validators import validate_customer_id, validate_probability, validate_limit, CustomerNotFoundError
     from src.logger import get_logger
 except ImportError:
     from constants import (
@@ -34,7 +34,7 @@ except ImportError:
         MAX_RETENTION_LIFT, HIGH_VALUE_CHURN_THRESHOLD, HIGH_VALUE_MIN_LTV,
         DEFAULT_CUSTOMERS_FILE, DEFAULT_TRANSACTIONS_FILE
     )
-    from validators import validate_customer_id, validate_probability, validate_limit
+    from validators import validate_customer_id, validate_probability, validate_limit, CustomerNotFoundError
     from logger import get_logger
 
 
@@ -49,10 +49,13 @@ class LoyaltyAgent:
         self.transactions_file = transactions_file
         self.customers: List[Dict] = []
         self.transactions: List[Dict] = []
+        # O(1) lookup indexes
+        self.customer_index: Dict[str, Dict] = {}
+        self.transaction_index: Dict[str, List[Dict]] = {}
         self._load_data()
 
     def _load_data(self) -> None:
-        """Load customer and transaction data from JSON files"""
+        """Load customer and transaction data from JSON files and build indexes"""
         try:
             customers_path = Path(self.customers_file)
             if customers_path.exists():
@@ -65,18 +68,34 @@ class LoyaltyAgent:
                 with open(transactions_path, 'r') as f:
                     self.transactions = json.load(f)
                 self.logger.info(f"Loaded {len(self.transactions)} transactions")
+
+            # Build indexes for O(1) lookups
+            self._build_indexes()
         except Exception as e:
             self.logger.error(f"Error loading data: {e}")
             raise
 
+    def _build_indexes(self) -> None:
+        """Build customer and transaction indexes for O(1) lookups"""
+        # Build customer index
+        self.customer_index = {c['customer_id']: c for c in self.customers}
+
+        # Build transaction index (group by customer_id)
+        self.transaction_index = {}
+        for txn in self.transactions:
+            customer_id = txn['customer_id']
+            if customer_id not in self.transaction_index:
+                self.transaction_index[customer_id] = []
+            self.transaction_index[customer_id].append(txn)
+
     def _get_customer(self, customer_id: str) -> Optional[Dict]:
-        """Get customer by ID"""
-        return next((c for c in self.customers if c['customer_id'] == customer_id), None)
+        """Get customer by ID using O(1) index lookup"""
+        return self.customer_index.get(customer_id)
 
     def _get_customer_transactions(self, customer_id: str) -> List[Dict]:
-        """Get completed transactions for a customer"""
-        return [t for t in self.transactions
-                if t['customer_id'] == customer_id and t['status'] == 'Completed']
+        """Get completed transactions for a customer using O(1) index lookup"""
+        txns = self.transaction_index.get(customer_id, [])
+        return [t for t in txns if t['status'] == 'Completed']
 
     def calculate_rfm_score(self, customer_id: str) -> Dict[str, float]:
         """Calculate RFM (Recency, Frequency, Monetary) score"""
@@ -85,8 +104,7 @@ class LoyaltyAgent:
 
         if not customer:
             self.logger.warning(f"Customer not found: {customer_id}")
-            return {"recency": 0, "frequency": 0, "monetary": 0, "rfm_score": 0,
-                    "error": "Customer not found"}
+            raise CustomerNotFoundError(f"Customer not found: {customer_id}")
 
         customer_txns = self._get_customer_transactions(customer_id)
         if not customer_txns:
@@ -127,7 +145,7 @@ class LoyaltyAgent:
 
         if not customer:
             self.logger.warning(f"Customer not found: {customer_id}")
-            return 1.0
+            raise CustomerNotFoundError(f"Customer not found: {customer_id}")
 
         # Recency risk
         last_purchase = datetime.strptime(customer['last_purchase_date'], "%Y-%m-%d")
@@ -176,7 +194,7 @@ class LoyaltyAgent:
         customer = self._get_customer(customer_id)
 
         if not customer:
-            return {"error": "Customer not found"}
+            raise CustomerNotFoundError(f"Customer not found: {customer_id}")
 
         rfm = self.calculate_rfm_score(customer_id)
         churn_prob = self.predict_churn_probability(customer_id)
@@ -233,7 +251,7 @@ class LoyaltyAgent:
         customer = self._get_customer(customer_id)
 
         if not customer:
-            return {"error": "Customer not found"}
+            raise CustomerNotFoundError(f"Customer not found: {customer_id}")
 
         segmentation = self.segment_customer(customer_id)
         churn_prob = segmentation['churn_probability']
@@ -286,7 +304,7 @@ class LoyaltyAgent:
 
         if not customer:
             self.logger.warning(f"Customer not found: {customer_id}")
-            return {"error": "Customer not found", "customer_id": customer_id}
+            raise CustomerNotFoundError(f"Customer not found: {customer_id}")
 
         rfm = self.calculate_rfm_score(customer_id)
         segmentation = self.segment_customer(customer_id)

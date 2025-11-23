@@ -11,6 +11,11 @@ class ValidationError(Exception):
     pass
 
 
+class CustomerNotFoundError(Exception):
+    """Custom exception for when a customer is not found"""
+    pass
+
+
 def validate_customer_id(customer_id: Any) -> str:
     """
     Validate customer ID format
